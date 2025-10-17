@@ -9,6 +9,20 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 DB_PATH   = os.environ.get("RIR_DB",        "/home/on61ewex/Database/db/rir_meta_v3.db")
+
+# Auto-download SQLite DB if a URL is provided and local file missing
+RIR_DB_URL = os.environ.get("RIR_DB_URL")  # e.g. https://.../rir_meta_v3.db
+if (not Path(DB_PATH).exists()) and RIR_DB_URL:
+    try:
+        import urllib.request, tempfile
+        tmp = Path(tempfile.gettempdir())/"rir_meta_v3.db"
+        if not tmp.exists():
+            urllib.request.urlretrieve(RIR_DB_URL, tmp.as_posix())
+        DB_PATH = tmp.as_posix()
+    except Exception as e:
+        # Fail gracefully; Streamlit will show an error if DB still missing
+        pass
+
 DB_PATH   = os.environ.get("RIR_DB_PATH",   DB_PATH)
 DATA_ROOT = Path(os.environ.get("RIR_DATA_ROOT", "/home/on61ewex/Database/data"))
 st.set_page_config(page_title="RIR Explorer", layout="wide")
