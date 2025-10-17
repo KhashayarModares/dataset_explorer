@@ -1,0 +1,18 @@
+# Core
+pandas==2.2.2
+numpy==1.26.4
+SQLAlchemy==2.0.32
+
+# UI
+streamlit==1.37.1
+altair==5.3.0
+protobuf==4.25.3
+
+# Audio / formats
+soundfile==0.12.1
+scipy==1.10.1
+h5py==3.10.0
+netCDF4==1.6.5
+
+# Useful / Streamlit perf
+pyarrow==16.1.0
