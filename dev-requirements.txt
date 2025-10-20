@@ -1,0 +1,5 @@
+# Optional / local-only scientific stack (NOT needed for the Streamlit app)
+scipy==1.10.1
+netCDF4==1.6.5
+h5py==3.10.0
+cftime==1.6.4.post1
