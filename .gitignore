@@ -1,5 +1,54 @@
-.venv/
+# Python cache and build
 __pycache__/
-*.pyc
-.streamlit/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors/OS
 .DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Streamlit
+.streamlit/
+
+# Data: ignore DBs by default, but keep this one
+*.db
+!rir_meta_v3.db
+
+# Archives & temp
+*.zip
+tmp/
+temp/
+# --- local backups & temp ---
+app/*.bak*
+app/*.bak_*
+app/*.gridfacets.*.bak
+*.bak
+*.tmp
+*.swp
+
+# logs & artifacts
+logs/
+re
+
+# Python & Streamlit caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.streamlit/
+
+# OS junk
+.DS_Store
+Thumbs.db
