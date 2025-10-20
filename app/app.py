@@ -25,6 +25,23 @@ if (not Path(DB_PATH).exists()) and RIR_DB_URL:
 DB_PATH = os.environ.get("RIR_DB_PATH", DB_PATH)
 DATA_ROOT = Path(os.environ.get("RIR_DATA_ROOT", "/home/on61ewex/Database/data")).resolve()
 
+# --- Fallbacks for Streamlit Cloud / portable runs ---
+# If the env-provided DB path doesn't exist, try the bundled repo DB at data/rir_meta_v3.db
+try:
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _BUNDLED_DB = (_REPO_ROOT / "data" / "rir_meta_v3.db").resolve()
+    if not Path(DB_PATH).exists() and _BUNDLED_DB.exists():
+        DB_PATH = _BUNDLED_DB.as_posix()
+    # Prefer a data/ directory under the repo for file copies/ZIP if the env root doesn't exist
+    if not DATA_ROOT.exists():
+        _BUNDLED_DATA = (_REPO_ROOT / "data").resolve()
+        if _BUNDLED_DATA.exists():
+            DATA_ROOT = _BUNDLED_DATA
+except Exception:
+    pass
+# --- end fallbacks ---
+
+
 st.set_page_config(page_title="RIR Explorer", layout="wide")
 
 # ========== Minimal modern style ==========
