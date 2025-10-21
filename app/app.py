@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import os, io, zipfile, shutil, tempfile, math, re
 from pathlib import Path
 from typing import Dict, Tuple, Any
@@ -40,6 +41,93 @@ try:
 except Exception:
     pass
 # --- end fallbacks ---
+# --- PATH REMAP & COPY POLICY ---
+# RIR_PATH_MAP format: "SRC1=DST1;SRC2=DST2;..."
+# Example: RIR_PATH_MAP="/home/on61ewex/Database/data=/mnt/public/rir_data;/old=/new"
+PATH_MAP_RAW = os.environ.get("RIR_PATH_MAP", "") or ""
+def _remap_path(fp: str) -> str:
+    rules = [r for r in PATH_MAP_RAW.split(";") if r.strip()]
+    for rule in rules:
+        if "=" in rule:
+            src, dst = rule.split("=", 1)
+            src = src.strip()
+            dst = dst.strip()
+            if src and fp.startswith(src):
+                return fp.replace(src, dst, 1)
+    return fp
+
+# If set to "1", allow copying files even if they are not under DATA_ROOT
+ALLOW_OUTSIDE = (os.environ.get("RIR_ALLOW_OUTSIDE", "0") == "1")
+# --- END PATH REMAP & COPY POLICY ---
+# -------- Helper: resolve fallback paths for a row --------
+def _resolve_candidate_path(row: dict) -> Path | None:
+    """
+    Given a row (dict-like), return a Path to the best existing file.
+    Strategy:
+      1) remap original file_path via RIR_PATH_MAP
+      2) if original contains '/Database/data/', join DATA_ROOT with the tail
+      3) dataset-aware guesses (DATA_ROOT/dataset/<basename>)
+      4) quick rglob within DATA_ROOT/dataset for the basename (first hit)
+    """
+    try:
+        orig = str(row.get("file_path","") or "")
+        ds   = str(row.get("dataset","") or "").strip()
+        base = Path(orig).name if orig else ""
+        cand = []
+
+        if orig:
+            # 1) remap
+            remap = _remap_path(orig)
+            if remap:
+                cand.append(Path(remap))
+
+            # 2) join tail after lab root
+            if "/Database/data/" in orig:
+                tail = orig.split("/Database/data/", 1)[1]
+                cand.append(DATA_ROOT / tail)
+
+        # 3) dataset-aware guesses
+        if ds and base:
+            cand.append(DATA_ROOT / ds / base)
+
+            # 4) quick rglob under dataset dir (first match only)
+            ds_dir = (DATA_ROOT / ds)
+            if ds_dir.exists():
+                try:
+                    for hit in ds_dir.rglob(base):
+                        cand.append(hit)
+                        break
+                except Exception:
+                    pass
+
+        # return first existing path
+        for c in cand:
+            try:
+                rp = c.resolve()
+            except Exception:
+                continue
+            if rp.exists():
+                return rp
+    except Exception:
+        pass
+    return None
+# -------- end helper --------
+
+# DEFAULT RIR_PATH_MAP if env var is empty:
+# Map lab path to the repo's data/public_sample (portable)
+if not PATH_MAP_RAW:
+    try:
+        _REPO_ROOT = Path(__file__).resolve().parent.parent
+        _SAMPLE = (_REPO_ROOT / "data" / "public_sample").resolve()
+        if _SAMPLE.exists():
+            PATH_MAP_RAW = f"/home/on61ewex/Database/data={_SAMPLE.as_posix()}"
+    except Exception:
+        pass
+
+# Prefer to allow copying outside DATA_ROOT by default (portable)
+if os.environ.get("RIR_ALLOW_OUTSIDE") is None:
+    ALLOW_OUTSIDE = True
+
 
 
 st.set_page_config(page_title="RIR Explorer", layout="wide")
@@ -250,30 +338,54 @@ def build_query(filters: Dict[str, Any], limit: int, offset: int) -> Tuple[str, 
     return f"SELECT * FROM rirs WHERE {where} ORDER BY dataset, file_name LIMIT :limit OFFSET :offset", p
 
 def build_zip_bytes(df: pd.DataFrame, max_files: int = 2000) -> Tuple[bytes, int, int]:
+    # _ZIP_DIAG_: enhanced logging
     staging = Path(tempfile.mkdtemp(prefix="rir_export_"))
     copied = 0
     candidates = 0
+    skipped_missing = 0
+    skipped_outside = 0
     try:
         for _, r in df.iterrows():
             fp = str(r.get("file_path","") or "")
-            if not fp: continue
-            candidates += 1
-            p = Path(fp)
-            try:
-                rp = p.resolve()
-            except Exception:
+            if not fp:
                 continue
-            if copied < max_files and rp.exists() and (DATA_ROOT in rp.parents or rp == DATA_ROOT):
-                dest = staging / p.name
+            candidates += 1
+            # apply path remap if configured
+            fp_remap = _remap_path(fp)
+            p_src = Path(fp_remap)
+            try:
+                rp = p_src.resolve()
+            except Exception:
+                rp = p_src
+            if not rp.exists():
+                skipped_missing += 1
+                continue
+            # enforce root unless overridden
+            under_root = (DATA_ROOT in rp.parents or rp == DATA_ROOT)
+            if not (under_root or ALLOW_OUTSIDE):
+                skipped_outside += 1
+                continue
+            if copied < max_files:
+                dest = staging / rp.name
                 i=1
                 while dest.exists():
-                    dest = staging / f"{p.stem}__{i}{p.suffix}"; i+=1
+                    dest = staging / f"{rp.stem}__{i}{rp.suffix}"; i+=1
                 try:
                     shutil.copy2(rp, dest)
                     copied += 1
                 except Exception:
                     pass
         (staging/"manifest.csv").write_bytes(df.to_csv(index=False).encode("utf-8"))
+        # also write a small diagnostics file
+        (staging/"zip_diagnostics.txt").write_text(
+            f"candidates={candidates}\n"
+            f"copied={copied}\n"
+            f"skipped_missing={skipped_missing}\n"
+            f"skipped_outside={skipped_outside}\n"
+            f"DATA_ROOT={DATA_ROOT}\n"
+            f"ALLOW_OUTSIDE={ALLOW_OUTSIDE}\n"
+            f"PATH_MAP_RAW={PATH_MAP_RAW}\n"
+        )
         buf=io.BytesIO()
         with zipfile.ZipFile(buf,"w",compression=zipfile.ZIP_DEFLATED) as z:
             for item in staging.iterdir():
