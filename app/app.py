@@ -247,75 +247,70 @@ def _best_local_path(row_like) -> Path | None:
         if fp:
             fp2 = _remap_path(fp)
             p = Path(fp2)
-            try:
-                rp = p.resolve()
-            except Exception:
-                rp = p
-            if rp.exists():
-                return rp
+            try: rp = p.resolve()
+            except Exception: rp = p
+            if rp.exists(): return rp
         rp2 = _resolve_candidate_path(row)
-        if rp2 and rp2.exists():
-            return rp2
+        if rp2 and rp2.exists(): return rp2
     except Exception:
         pass
     return None
 
 def build_zip_bytes(df: pd.DataFrame, max_files: int | None = None) -> Tuple[bytes, int, int]:
+def build_zip_bytes(df: pd.DataFrame, max_files: int | None = None) -> Tuple[bytes, int, int]:
     staging = Path(tempfile.mkdtemp(prefix="rir_export_", dir=os.environ.get("TMPDIR", (Path.home()/".cache/rir_tmp").as_posix())))
     copied = candidates = skipped_missing = skipped_outside = 0
-    tried_lines = []
+    tried = []
     try:
         for _, r in df.iterrows():
             candidates += 1
+            # record what we tried for this row (dataset, filename)
             ds = str(r.get("dataset",""))
-            raw_fp = str(r.get("file_path","") or "")
+            fp = str(r.get("file_path","") or "")
             rp = _best_local_path(r.to_dict())
             if not rp or not rp.exists():
                 skipped_missing += 1
-                tried_lines.append(f"MISSING | {ds} | {raw_fp}")
+                tried.append(f"MISSING | {ds} | {fp}")
                 continue
             under_root = (DATA_ROOT in rp.parents or rp == DATA_ROOT)
             if not (under_root or ALLOW_OUTSIDE):
                 skipped_outside += 1
-                tried_lines.append(f"OUTSIDE | {ds} | {rp}")
+                tried.append(f"OUTSIDE | {ds} | {rp}")
                 continue
-            tried_lines.append(f"COPY    | {ds} | {rp}")
+            tried.append(f"COPY    | {ds} | {rp}")
             if (max_files is None) or (copied < max_files):
                 dest = staging / rp.name
-                i = 1
+                i=1
                 while dest.exists():
-                    dest = staging / f"{rp.stem}__{i}{rp.suffix}"
-                    i += 1
+                    dest = staging / f"{rp.stem}__{i}{rp.suffix}"; i+=1
                 try:
                     shutil.copy2(rp, dest)
                     copied += 1
                 except Exception as e:
-                    tried_lines.append(f"ERROR   | {ds} | {rp} | {e}")
-
-        # Always include manifest + diagnostics
-        (staging / "manifest.csv").write_bytes(df.to_csv(index=False).encode("utf-8"))
-        (staging / "zip_diagnostics.txt").write_text(
-            "candidates={}\n"
-            "copied={}\n"
-            "skipped_missing={}\n"
-            "skipped_outside={}\n"
-            "DATA_ROOT={}\n"
-            "ALLOW_OUTSIDE={}\n"
-            "PATH_MAP_RAW={}\n"
-            "{}\n".format(
-                candidates, copied, skipped_missing, skipped_outside,
-                DATA_ROOT, ALLOW_OUTSIDE, PATH_MAP_RAW, "\n".join(tried_lines)
-            )
+                    tried.append(f"ERROR   | {ds} | {rp} | {e}")
+        # always include manifest
+        (staging/"manifest.csv").write_bytes(df.to_csv(index=False).encode("utf-8"))
+        # diagnostics
+        (staging/"zip_diagnostics.txt").write_text(
+            f"candidates={candidates}\n"
+            f"copied={copied}\n"
+            f"skipped_missing={skipped_missing}\n"
+            f"skipped_outside={skipped_outside}\n"
+            f"DATA_ROOT={DATA_ROOT}\n"
+            f"ALLOW_OUTSIDE={ALLOW_OUTSIDE}\n"
+            f"PATH_MAP_RAW={PATH_MAP_RAW}\n"
+            + "\n".join(tried) + "\n"
         )
-
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        buf=io.BytesIO()
+        with zipfile.ZipFile(buf,"w",compression=zipfile.ZIP_DEFLATED) as z:
             for item in staging.iterdir():
                 z.write(item, arcname=item.name)
         buf.seek(0)
         return buf.read(), copied, candidates
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
 # ---- Chart export (robust) ----
 def chart_bytes(chart: alt.Chart, fmt: str) -> Tuple[bytes, str]:
     spec = chart.to_dict()  # Vega-Lite spec
@@ -598,3 +593,77 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+# ===== Improved Top-K helper (explicit filter + domain) =====
+def _make_hist_bins_v2(df_in: pd.DataFrame, value_col: str, title: str,
+                       topk: int, facet: bool, bins: int, strict_topk: bool):
+    import pandas as _pd
+    g = df_in.dropna(subset=[value_col, "dataset"]).copy()
+    if g.empty:
+        return alt.Chart(_pd.DataFrame({"msg": ["No data"]})).mark_text(size=14, opacity=0.8) \
+            .encode(text="msg").properties(height=80, title=title)
+
+    # Normalize dataset names
+    g["dataset_clean"] = g["dataset"].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+
+    # Top-K by count of non-null values for the chosen metric
+    counts = g.groupby("dataset_clean")[value_col].count().sort_values(ascending=False)
+    eligible = int(len(counts))
+    k = max(0, min(int(topk), eligible))
+    top = counts.head(k).index.tolist()
+
+    if k == 0:
+        return alt.Chart(_pd.DataFrame({"msg": ["No eligible datasets for this metric"]})) \
+                 .mark_text(size=14, opacity=0.8).encode(text="msg") \
+                 .properties(height=80, title=title)
+
+    if strict_topk:
+        g_use = g[g["dataset_clean"].isin(top)].copy()
+        if g_use.empty:
+            return alt.Chart(_pd.DataFrame({"msg": ["No Top-K data"]})) \
+                     .mark_text(size=14, opacity=0.8).encode(text="msg") \
+                     .properties(height=80, title=title)
+        if facet:
+            ncols = min(6, max(2, int(math.ceil(math.sqrt(max(1, k))))))
+            base = alt.Chart(g_use).mark_bar(opacity=0.9).encode(
+                x=alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=int(bins)), title=title),
+                y=alt.Y("count()", title="Count"),
+                color=alt.Color("dataset_clean:N", legend=None, scale=alt.Scale(domain=top)),
+            ).properties(height=140, width=220)
+            return base.facet(facet=alt.Facet("dataset_clean:N", title=None, sort=top), columns=ncols) \
+                       .resolve_scale(x="shared", y="independent")
+        return alt.Chart(g_use).mark_bar(opacity=0.9).encode(
+            x=alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=int(bins)), title=title),
+            y=alt.Y("count()", title="Count"),
+            color=alt.Color("dataset_clean:N", title="Dataset (Top-K)", scale=alt.Scale(domain=top)),
+        ).properties(height=280, title=f"{title} — Top {k} only")
+
+    # NON-STRICT: Top-K + Other
+    g["grp"] = g["dataset_clean"].apply(lambda d: d if d in top else "Other")
+    if facet:
+        tops = g[g["grp"] != "Other"]
+        ncols = min(6, max(2, int(math.ceil(math.sqrt(max(1, k))))))
+        base = alt.Chart(tops).mark_bar(opacity=0.85).encode(
+            x=alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=int(bins)), title=title),
+            y=alt.Y("count()", title="Count"),
+            color=alt.Color("dataset_clean:N", legend=None, scale=alt.Scale(domain=top)),
+        ).properties(height=140, width=220)
+        charts = base.facet(facet=alt.Facet("dataset_clean:N", title=None, sort=top), columns=ncols) \
+                     .resolve_scale(x="shared", y="independent")
+        others = g[g["grp"] == "Other"]
+        if not others.empty:
+            layer_others = alt.Chart(others).mark_bar(opacity=0.35).encode(
+                x=alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=int(bins)), title=title),
+                y=alt.Y("count()", title="Count"),
+                color=alt.value("#CCCCCC"),
+            ).properties(height=140, width=220)
+            other_card = layer_others.properties(title="Other")
+            return charts & other_card
+        return charts
+
+    sort_order = top + (["Other"] if (g["grp"] == "Other").any() else [])
+    return alt.Chart(g).mark_bar(opacity=0.85).encode(
+        x=alt.X(f"{value_col}:Q", bin=alt.Bin(maxbins=int(bins)), title=title),
+        y=alt.Y("count()", title="Count"),
+        color=alt.Color("grp:N", title="Dataset (Top-K + Other)", scale=alt.Scale(domain=sort_order)),
+    ).properties(height=280, title=f"{title} — overlay by dataset (Top {k} + Other)")
