@@ -56,3 +56,8 @@ data/*.db
 Database/*.db
 *.sqlite
 *.sqlite3
+
+# Local artifacts
+*.sofa
+urls_all.txt
+dataset_explorer/
