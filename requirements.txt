@@ -1,7 +1,9 @@
-# --- Minimal, app-only deps (compatible with Python 3.11 on Streamlit Cloud) ---
+# Core dashboard dependencies (Python 3.11)
 streamlit==1.37.1
 pandas==2.2.2
 numpy==1.26.4
 sqlalchemy==2.0.32
 altair==5.3.0
-psycopg2-binary==2.9.9   # safe "binary" build; app falls back to SQLite if PG isn't used
+vl-convert-python>=1.6,<2
+# Optional PostgreSQL driver for separate migration workflows
+psycopg2-binary==2.9.9
