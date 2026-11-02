@@ -257,7 +257,6 @@ def _best_local_path(row_like) -> Path | None:
     return None
 
 def build_zip_bytes(df: pd.DataFrame, max_files: int | None = None) -> Tuple[bytes, int, int]:
-def build_zip_bytes(df: pd.DataFrame, max_files: int | None = None) -> Tuple[bytes, int, int]:
     staging = Path(tempfile.mkdtemp(prefix="rir_export_", dir=os.environ.get("TMPDIR", (Path.home()/".cache/rir_tmp").as_posix())))
     copied = candidates = skipped_missing = skipped_outside = 0
     tried = []
