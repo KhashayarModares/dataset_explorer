@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import os, io, zipfile, shutil, tempfile, math, re
+import os, math, re, time
 from pathlib import Path
 from typing import Dict, Tuple, Any
 import numpy as np
@@ -9,6 +9,11 @@ import streamlit as st
 import altair as alt
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+
+try:
+    from app.export_utils import ONE_GB, make_export_plan, build_zip_bytes, copy_without_compression
+except ImportError:  # streamlit run app/app.py can place app/ on sys.path
+    from export_utils import ONE_GB, make_export_plan, build_zip_bytes, copy_without_compression
 
 # ---- PNG/SVG/PDF export via vl-convert (no browser, no chrome) ----
 try:
@@ -237,7 +242,7 @@ def distincts_and_ranges(_sig: str):
     """).iloc[0].to_dict()
     return datasets, srs, rooms, fmts, ambs, los_ui, mm
 
-# ---- ZIP builder (local) ----
+# ---- Local file export helpers ----
 def _best_local_path(row_like) -> Path | None:
     try:
         row = dict(row_like)
@@ -254,58 +259,40 @@ def _best_local_path(row_like) -> Path | None:
         pass
     return None
 
-def build_zip_bytes(df: pd.DataFrame, max_files: int | None = None) -> Tuple[bytes, int, int]:
-    staging = Path(tempfile.mkdtemp(prefix="rir_export_", dir=os.environ.get("TMPDIR", (Path.home()/".cache/rir_tmp").as_posix())))
-    copied = candidates = skipped_missing = skipped_outside = 0
-    tried = []
-    try:
-        for _, r in df.iterrows():
-            candidates += 1
-            # record what we tried for this row (dataset, filename)
-            ds = str(r.get("dataset",""))
-            fp = str(r.get("file_path","") or "")
-            rp = _best_local_path(r.to_dict())
-            if not rp or not rp.exists():
-                skipped_missing += 1
-                tried.append(f"MISSING | {ds} | {fp}")
-                continue
-            under_root = (DATA_ROOT in rp.parents or rp == DATA_ROOT)
-            if not (under_root or ALLOW_OUTSIDE):
-                skipped_outside += 1
-                tried.append(f"OUTSIDE | {ds} | {rp}")
-                continue
-            tried.append(f"COPY    | {ds} | {rp}")
-            if (max_files is None) or (copied < max_files):
-                dest = staging / rp.name
-                i=1
-                while dest.exists():
-                    dest = staging / f"{rp.stem}__{i}{rp.suffix}"; i+=1
-                try:
-                    shutil.copy2(rp, dest)
-                    copied += 1
-                except Exception as e:
-                    tried.append(f"ERROR   | {ds} | {rp} | {e}")
-        # always include manifest
-        (staging/"manifest.csv").write_bytes(df.to_csv(index=False).encode("utf-8"))
-        # diagnostics
-        (staging/"zip_diagnostics.txt").write_text(
-            f"candidates={candidates}\n"
-            f"copied={copied}\n"
-            f"skipped_missing={skipped_missing}\n"
-            f"skipped_outside={skipped_outside}\n"
-            f"DATA_ROOT={DATA_ROOT}\n"
-            f"ALLOW_OUTSIDE={ALLOW_OUTSIDE}\n"
-            f"PATH_MAP_RAW={PATH_MAP_RAW}\n"
-            + "\n".join(tried) + "\n"
-        )
-        buf=io.BytesIO()
-        with zipfile.ZipFile(buf,"w",compression=zipfile.ZIP_DEFLATED) as z:
-            for item in staging.iterdir():
-                z.write(item, arcname=item.name)
-        buf.seek(0)
-        return buf.read(), copied, candidates
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+def _export_plan(df: pd.DataFrame):
+    return make_export_plan(df.to_dict("records"), DATA_ROOT, _best_local_path, ALLOW_OUTSIDE)
+
+
+def _format_bytes(size: int) -> str:
+    if size >= 1_000_000_000:
+        return f"{size / 1_000_000_000:,.2f} GB"
+    if size >= 1_000_000:
+        return f"{size / 1_000_000:,.1f} MB"
+    return f"{size / 1_000:,.1f} KB"
+
+
+def _progress_reporter(label: str):
+    bar = st.progress(0, text=f"{label}: starting…")
+    status = st.empty()
+    started = time.monotonic()
+    last_tick = [0.0, -1]
+
+    def update(processed: int, total: int, current_file: str) -> None:
+        fraction = min(1.0, processed / total) if total else 1.0
+        percent = round(fraction * 100)
+        now = time.monotonic()
+        if percent != last_tick[1] or now - last_tick[0] >= 0.5 or processed >= total:
+            bar.progress(percent, text=f"{label}: {percent}%")
+            elapsed = now - started
+            eta = (elapsed / fraction - elapsed) if 0 < fraction < 1 else 0
+            remaining = f" | approximately {eta:,.0f} s remaining" if eta else ""
+            status.caption(
+                f"Processed {_format_bytes(processed)} / {_format_bytes(total)} "
+                f"| elapsed {elapsed:,.0f} s{remaining} | {current_file}"
+            )
+            last_tick[:] = [now, percent]
+
+    return update
 
 
 # ---- Chart export (robust) ----
@@ -337,6 +324,9 @@ def main():
     st.session_state.setdefault("zip_ready", False)
     st.session_state.setdefault("zip_bytes", None)
     st.session_state.setdefault("zip_note", "")
+    st.session_state.setdefault("zip_pending_plan", None)
+    st.session_state.setdefault("zip_saved_path", None)
+    st.session_state.setdefault("copy_note", "")
 
     datasets, sr_opts, room_opts, fmt_opts, amb_opts, los_opts_ui, mm = distincts_and_ranges(_db_sig())
 
@@ -374,6 +364,9 @@ def main():
         st.session_state["zip_ready"] = False
         st.session_state["zip_bytes"] = None
         st.session_state["zip_note"] = ""
+        st.session_state["zip_pending_plan"] = None
+        st.session_state["zip_saved_path"] = None
+        st.session_state["copy_note"] = ""
 
         filters = {
             "datasets": ds_sel, "fmts": fmt_sel, "sr": sr_sel,
@@ -542,43 +535,143 @@ def main():
 
         st.markdown("---")
         st.header("Export (local files)")
-        st.markdown("#### Export current results")
+        st.caption("Exports use the current search results page, not the entire database. "
+                   "Files are read from the computer running Streamlit.")
 
-        c1, c2 = st.columns([1,2])
-        c1.download_button(
+        st.download_button(
             "Download CSV (this page's results)",
             data=last_df.to_csv(index=False).encode("utf-8"),
             file_name="rir_results_page.csv",
             mime="text/csv",
             key="csv_dl_btn"
         )
-        with c2:
-            if st.button("Build ZIP now", type="secondary", key="zip_build_btn"):
-                with st.spinner("Collecting files and building ZIP…"):
-                    zbytes, copied, candidates = build_zip_bytes(last_df, max_files=None)
+
+        st.subheader("1. Compress and download a ZIP")
+        st.caption("The source file sizes are checked first. Archives over 1 GB require "
+                   "confirmation before compression begins.")
+        save_zip_copy = st.checkbox(
+            "Also save a ZIP copy on the Streamlit host", value=False,
+            key="zip_save_server",
+            help="Optional: writes an additional archive under RIR_EXPORTS."
+        )
+        if st.button("Prepare ZIP", type="secondary", key="zip_build_btn"):
+            with st.spinner("Checking local file paths and sizes…"):
+                plan = _export_plan(last_df)
+            st.session_state["zip_pending_plan"] = plan
+            st.session_state["zip_ready"] = False
+            st.session_state["zip_bytes"] = None
+            st.session_state["zip_saved_path"] = None
+
+        pending = st.session_state.get("zip_pending_plan")
+        if pending is not None:
+            st.info(f"Selected **{len(pending.entries):,} accessible files** "
+                    f"({pending.candidates:,} rows), total source size "
+                    f"**{_format_bytes(pending.total_bytes)}**.")
+            if pending.skipped_missing or pending.skipped_outside or pending.skipped_unreadable:
+                st.warning(f"Skipped {pending.skipped_missing} missing/non-file, "
+                           f"{pending.skipped_outside} outside allowed root, and "
+                           f"{pending.skipped_unreadable} unreadable entries.")
+
+            def finish_zip():
+                if not pending.entries:
+                    st.error("No accessible source files. Check 'Path check' above and the data root.")
+                    st.session_state["zip_pending_plan"] = None
+                    return
+                try:
+                    with st.spinner("Compressing selected source files…"):
+                        zbytes = build_zip_bytes(
+                            pending, last_df.to_csv(index=False).encode("utf-8"),
+                            _progress_reporter("Compressing")
+                        )
                     st.session_state["zip_bytes"] = zbytes
                     st.session_state["zip_ready"] = True
-                    st.session_state["zip_diag"] = {"copied":copied,"candidates":candidates}
-                    st.session_state["zip_note"]  = f"Added {copied} of {candidates} candidate files. Includes manifest.csv."
-            if st.session_state["zip_ready"] and st.session_state.get("zip_bytes"):
-                st.success(st.session_state.get("zip_note","ZIP ready."))
-                st.write("Copy summary:", st.session_state.get("zip_diag", {}))
-                try:
-                    exports_dir = Path(os.environ.get("RIR_EXPORTS", str(DATA_ROOT / "_exports")))
-                    exports_dir.mkdir(parents=True, exist_ok=True)
-                    out_file = exports_dir / "rir_export_page.zip"
-                    with open(out_file, "wb") as f:
-                        f.write(st.session_state["zip_bytes"])
-                    st.caption(f"Saved a copy to: {out_file}")
-                except Exception as e:
-                    st.info(f"Could not save copy to _exports: {e}")
-                st.download_button(
-                    "Download ZIP",
-                    data=st.session_state["zip_bytes"],
-                    file_name="rir_export_page.zip",
-                    mime="application/zip",
-                    key="zip_dl_btn"
+                    st.session_state["zip_note"] = (
+                        f"ZIP ready: {len(pending.entries):,} files, "
+                        f"{_format_bytes(pending.total_bytes)} of source data, "
+                        f"{_format_bytes(len(zbytes))} compressed."
+                    )
+                    if save_zip_copy:
+                        try:
+                            exports_dir = Path(os.environ.get(
+                                "RIR_EXPORTS", str(DATA_ROOT / "_exports")
+                            )).expanduser().resolve()
+                            exports_dir.mkdir(parents=True, exist_ok=True)
+                            out_file = exports_dir / f"rir_export_{time.time_ns()}.zip"
+                            with out_file.open("xb") as output:
+                                output.write(zbytes)
+                            st.session_state["zip_saved_path"] = str(out_file)
+                        except OSError as exc:
+                            st.warning(f"ZIP prepared, but saving an extra server copy failed: {exc}")
+                except (OSError, ValueError, RuntimeError) as exc:
+                    st.error(f"ZIP generation failed: {exc}")
+                finally:
+                    st.session_state["zip_pending_plan"] = None
+
+            if pending.entries and pending.total_bytes > ONE_GB:
+                st.warning(
+                    "This export exceeds 1 GB. ZIP compression and browser download "
+                    "may take a long time and require substantial server memory. Proceed?"
                 )
+                confirm, cancel = st.columns(2)
+                if confirm.button("Yes, compress ZIP", type="primary", key="zip_confirm_btn"):
+                    finish_zip()
+                if cancel.button("No, cancel", key="zip_cancel_btn"):
+                    st.session_state["zip_pending_plan"] = None
+                    st.info("ZIP compression cancelled. No archive was created.")
+            else:
+                finish_zip()
+
+        if st.session_state.get("zip_ready") and st.session_state.get("zip_bytes"):
+            st.success(st.session_state.get("zip_note", "ZIP ready."))
+            if st.session_state.get("zip_saved_path"):
+                st.caption(f"Additional server copy: {st.session_state['zip_saved_path']}")
+            st.download_button(
+                "Download ZIP",
+                data=st.session_state["zip_bytes"],
+                file_name="rir_export_page.zip",
+                mime="application/zip",
+                key="zip_dl_btn"
+            )
+
+        st.markdown("---")
+        st.subheader("2. Copy files without compression")
+        copy_root = Path(os.environ.get(
+            "RIR_COPY_ROOT", os.environ.get(
+                "TMPDIR", str(Path.home() / ".cache/rir_tmp")
+            )
+        )).expanduser().resolve()
+        destination = st.text_input(
+            "Destination directory on the Streamlit host",
+            value=str(copy_root), key="copy_destination",
+            help="Files are copied into a new rir_copy_* subfolder. "
+                 "The destination must be inside RIR_COPY_ROOT."
+        )
+        st.caption(f"Allowed destination root: `{copy_root}`. "
+                   "To choose another location, set RIR_COPY_ROOT before launching Streamlit. "
+                   "This copies files on the host, not directly to a remote browser computer.")
+        if st.button("Copy selected files (no compression)", key="copy_files_btn"):
+            with st.spinner("Checking local file paths and sizes…"):
+                plan = _export_plan(last_df)
+            st.info(f"Copying {len(plan.entries):,} files "
+                    f"({_format_bytes(plan.total_bytes)} of source data).")
+            if not plan.entries:
+                st.error("No accessible files to copy. Check the dataset root and path diagnostics.")
+            else:
+                try:
+                    with st.spinner("Copying source files without compression…"):
+                        output_dir = copy_without_compression(
+                            plan, last_df.to_csv(index=False).encode("utf-8"),
+                            Path(destination), copy_root,
+                            _progress_reporter("Copying")
+                        )
+                    st.session_state["copy_note"] = (
+                        f"Copied {len(plan.entries):,} files "
+                        f"({_format_bytes(plan.total_bytes)}) into {output_dir}"
+                    )
+                except (OSError, ValueError, RuntimeError) as exc:
+                    st.error(f"Copy failed: {exc}. A partial copy may remain on the host.")
+        if st.session_state.get("copy_note"):
+            st.success(st.session_state["copy_note"])
 
     else:
         st.info("Run a search to see distributions and export options.", icon="🔎")
