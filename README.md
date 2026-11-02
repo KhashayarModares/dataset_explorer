@@ -28,6 +28,8 @@ dataset_explorer/
 ├── requirements.txt            # Dashboard dependencies
 ├── dev-requirements.txt        # Audio/scientific dependencies
 ├── runtime.txt                 # Python 3.11 for hosted environments
+├── app/export_utils.py         # Size preflight, byte-progress ZIP and copy operations
+├── tests/test_export_utils.py  # Offline regression tests
 ├── CITATION.cff                # Citation metadata
 ├── data/public_sample/         # Small illustrative files; NOT the full corpus
 └── README.md
@@ -44,7 +46,7 @@ $HOME/
     │   ├── BRAS/
     │   ├── AnotherDataset/
     │   └── MyNewDataset/                 # Put extracted WAV/SOFA/MAT files here
-    └── tmp/                              # Optional temporary ZIP workspace
+    └── tmp/                              # Default root for uncompressed file copies
 ~~~
 
 Any readable paths are acceptable when consistently supplied in the commands. Do not commit institutional datasets, private paths, credentials, a large SQLite database, or copyrighted audio into Git. Back up the SQLite file before running any script that writes to it.
@@ -67,6 +69,7 @@ export RIR_DB_PATH="$RIR_DB"
 export RIR_DATA_ROOT="$HOME/Database/data"
 export TMPDIR="$HOME/Database/tmp"
 export RIR_ALLOW_OUTSIDE=0
+export RIR_COPY_ROOT="$TMPDIR"  # Restrict destination choices to this host directory
 unset RIR_PGURL
 ~~~
 
@@ -126,9 +129,10 @@ How to use it:
 1. Choose datasets, file types, sample rates, room/LOS and other optional filters in the sidebar.
 2. Click **Search**; the app queries the `rirs` table using SQLAlchemy and pandas.
 3. Inspect the table and metric distributions. Pagination means exports refer to the **displayed results page**, not automatically to the entire database.
-4. Use **Download CSV** for metadata. For recordings, click **Build ZIP now**, check the number of copied files, then **Download ZIP**.
+4. Use **Download CSV** for metadata. For recordings, click **Prepare ZIP**. The app first scans accessible source files, reports their count and total size, and asks for confirmation if the size exceeds **1 GB (1,000,000,000 bytes)**. During compression, a progress bar reports source bytes processed, elapsed time, and an approximate remaining time. Finally click **Download ZIP**.
+5. To avoid compression, enter a destination under the configured **RIR_COPY_ROOT** and click **Copy selected files (no compression)**. The app copies original files into a new uniquely named `rir_copy_*` folder **on the Streamlit host**, preserving dataset subfolders. A progress bar shows the number of bytes copied.
 
-A ZIP includes `manifest.csv` and `zip_diagnostics.txt`. Recordings are included **only when their paths resolve on the computer running Streamlit**. Downloading only the SQLite database does not download the original recordings. If many paths are listed as `MISSING`, provide the original data tree or set `RIR_PATH_MAP` (see §9). For large datasets, start with a small result page: ZIP creation may require substantial RAM, disk space, and time. Treat the `_exports` copy and diagnostics as potentially sensitive; restrict access if using shared machines.
+ZIPs and uncompressed copy folders include `manifest.csv` and `zip_diagnostics.txt`. Files inside either export are under a `files/` subfolder. Recordings are included **only when their paths resolve on the computer running Streamlit**. Downloading only the SQLite database does not download the original recordings. If many paths are listed as `MISSING`, provide the original data tree or set `RIR_PATH_MAP` (see §9). For large datasets, start with a small result page: ZIP creation may require substantial RAM, disk space, and time. Streamlit's browser download button retains the ZIP data in memory, so very large archives can still exhaust memory even though compression now streams input in chunks. The uncompressed host-copy option avoids archive creation and browser download. Treat the `_exports` copy and diagnostics as potentially sensitive; restrict access if using shared machines.
 
 **Networking:** `127.0.0.1` is the machine running the app; it is not a remote server address. For remote access, prefer an authenticated SSH port forward or a properly access-controlled tunnel. Do not publicly expose an unrestricted dashboard connected to private datasets. GitHub hosts the **source code**; cloning it does not copy external metadata databases or source recordings.
 
@@ -232,7 +236,7 @@ This procedure uses only generic paths. Adjust them for your own installation; *
 | Populated SQLite file | `$HOME/Database/db/rir_meta_v3.db` | Metadata query and export |
 | Dataset recordings | `$HOME/Database/data/<dataset>/` | Download of audio and acoustic backfill |
 | Python environment | `dataset_explorer/.venv/` | Install independently on each operating system |
-| Temporary/export folders | `$HOME/Database/tmp/`, `$HOME/Database/data/_exports/` | ZIP creation |
+| Temporary/export folders | `$HOME/Database/tmp/`, `$HOME/Database/data/_exports/` | Uncompressed host copies and optional saved ZIPs |
 
 **Run the app on Linux** after cloning the repository and supplying a real, populated database:
 
@@ -244,6 +248,7 @@ export RIR_DB_PATH="$RIR_DB"
 export RIR_DATA_ROOT="$HOME/Database/data"
 export TMPDIR="$HOME/Database/tmp"
 export RIR_EXPORTS="$RIR_DATA_ROOT/_exports"
+export RIR_COPY_ROOT="$TMPDIR"
 export RIR_ALLOW_OUTSIDE=0
 unset RIR_PATH_MAP
 mkdir -p "$TMPDIR"
@@ -294,6 +299,7 @@ $env:RIR_PATH_MAP = "/old/workspace/data/=D:\RIR_Data\"
 $env:RIR_ALLOW_OUTSIDE = "0"
 $env:TMPDIR = Join-Path $HOME "RIR_Tmp"
 $env:RIR_EXPORTS = Join-Path $HOME "RIR_Exports"
+$env:RIR_COPY_ROOT = $env:TMPDIR
 New-Item -ItemType Directory -Force $env:TMPDIR, $env:RIR_EXPORTS | Out-Null
 Test-Path $env:RIR_DB
 python -m streamlit run app\app.py --server.address 127.0.0.1 --server.port 8501
@@ -312,7 +318,7 @@ The following paths document the installation used during project development. T
 | Repository checkout | `/home/on61ewex/code/dataset_explorer/` |
 | SQLite metadata | `/home/on61ewex/Database/db/rir_meta_v3.db` |
 | Original RIR files | `/home/on61ewex/Database/data/` |
-| ZIP temporary staging | `/home/on61ewex/Database/tmp/` |
+| Default host copy root | `/home/on61ewex/Database/tmp/` |
 | Optional ZIP copies | `/home/on61ewex/Database/data/_exports/` |
 
 **Run on the Linux host itself:**
@@ -325,6 +331,7 @@ export RIR_DB_PATH="$RIR_DB"
 export RIR_DATA_ROOT="/home/on61ewex/Database/data"
 export TMPDIR="/home/on61ewex/Database/tmp"
 export RIR_EXPORTS="/home/on61ewex/Database/data/_exports"
+export RIR_COPY_ROOT="$TMPDIR"
 export RIR_ALLOW_OUTSIDE=0
 unset RIR_PATH_MAP
 mkdir -p "$TMPDIR" "$RIR_EXPORTS"
@@ -351,8 +358,9 @@ A user who views this Linux-hosted Streamlit instance through an approved privat
 | `RIR_DATA_ROOT` | Root directory for local recording lookup |
 | `RIR_PATH_MAP` | Optional semicolon-separated `old-prefix=new-prefix` mappings |
 | `RIR_ALLOW_OUTSIDE` | `0` (default) restricts ZIP copying to `RIR_DATA_ROOT`; `1` permits other readable paths |
-| `TMPDIR` | Writable temporary folder for ZIP staging |
-| `RIR_EXPORTS` | Destination for an additional ZIP copy |
+| `TMPDIR` | Writable temporary folder; also the default base for host copies |
+| `RIR_EXPORTS` | Optional saved ZIP archives on the Streamlit host |
+| `RIR_COPY_ROOT` | Authorized parent directory for the no-compression copy operation; destination must stay within this root |
 | `PUBLIC_DATA_BASE_URL` | Optional externally hosted URL prefix; it does **not** upload data |
 
 The `file_path` column stores file-system locations. A corresponding `public_url` is meaningful only when an external file server has separately been configured and authorized.
@@ -363,7 +371,8 @@ The `file_path` column stores file-system locations. A corresponding `public_url
 - [ ] At least one representative `file_path` resolves to a readable recording on the machine running Streamlit.
 - [ ] Installation succeeds in a fresh Python 3.11 virtual environment.
 - [ ] Search, distribution plots and CSV export work.
-- [ ] A small ZIP contains audio, `manifest.csv` and `zip_diagnostics.txt`.
+- [ ] A small ZIP contains audio in `files/`, plus `manifest.csv` and `zip_diagnostics.txt`.
+- [ ] A no-compression copy produces a unique `rir_copy_*` folder under `RIR_COPY_ROOT` with original recordings and manifest, without modifying the source files.
 - [ ] T60/C50/C80 results are checked against representative reference signals before scientific use.
 - [ ] Dataset licenses, institutional permissions and disk quotas permit the intended copying and sharing.
 
@@ -374,7 +383,7 @@ The `file_path` column stores file-system locations. A corresponding `public_url
 | `streamlit` not found | Activate the environment; try `python -m streamlit` |
 | Browser cannot open `0.0.0.0` | Use the actual hostname or `127.0.0.1` on the host |
 | ZIP contains only metadata/diagnostics | Source recordings missing, path mapping incorrect, or outside-root policy |
-| Export stalls | Limit the result set; ZIP creation stages files and holds the archive in memory |
+| Export stalls | Limit the result set; ZIP creation compresses directly from original files but holds the completed download in memory |
 | New datasets not visible | Click Search; cached dataset options may take up to five minutes to refresh |
 
 
@@ -403,7 +412,8 @@ python --version
 ## 11. Project maintenance
 
 - Edit scripts in a feature branch; test against a copy of the database.
-- Verify `python -m py_compile app/app.py tools/ingest_bras_audio.py scripts/backfill_t60.py scripts/backfill_bp.py`.
+- Verify `python -m py_compile app/app.py app/export_utils.py tools/ingest_bras_audio.py scripts/backfill_t60.py scripts/backfill_bp.py`.
+- Run offline file-export regression tests: `python -m unittest discover -s tests -v`.
 - Keep generated databases and raw archives out of commits. Review `git status` before pushing.
 - The dataset-specific ingester and acoustic loaders should be extended and validated when introducing a new file format or corpus structure.
 
