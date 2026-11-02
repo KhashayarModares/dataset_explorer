@@ -10,9 +10,12 @@ import altair as alt
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-try:
-    from app.export_utils import ONE_GB, make_export_plan, build_zip_bytes, copy_without_compression
-except ImportError:  # streamlit run app/app.py can place app/ on sys.path
+# Streamlit runs this file as a script with app/ on sys.path.
+# Avoid importing app.export_utils in that mode: Python can import app.py
+# as the 'app' module and execute Streamlit commands twice.
+if __package__:
+    from .export_utils import ONE_GB, make_export_plan, build_zip_bytes, copy_without_compression
+else:
     from export_utils import ONE_GB, make_export_plan, build_zip_bytes, copy_without_compression
 
 # ---- PNG/SVG/PDF export via vl-convert (no browser, no chrome) ----
