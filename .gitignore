@@ -23,9 +23,15 @@ env/
 # Streamlit
 .streamlit/
 
-# Data: ignore DBs by default, but keep this one
+# Data: never commit local SQLite database copies
 *.db
-!rir_meta_v3.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Archives & temp
 *.zip
@@ -61,3 +67,10 @@ Database/*.db
 *.sofa
 urls_all.txt
 dataset_explorer/
+
+# Downloaded audio and scientific corpus files (tracked fixtures remain tracked)
+*.wav
+*.mat
+*.h5
+*.hdf5
+*.flac
