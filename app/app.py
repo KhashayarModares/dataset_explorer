@@ -40,8 +40,6 @@ def _remap_path(fp: str) -> str:
     return fp
 
 ALLOW_OUTSIDE = (os.environ.get("RIR_ALLOW_OUTSIDE", "0") == "1")
-if os.environ.get("RIR_ALLOW_OUTSIDE") is None:
-    ALLOW_OUTSIDE = True
 
 PUBLIC_DATA_BASE_URL = (os.environ.get("PUBLIC_DATA_BASE_URL","") or "").rstrip("/")
 
@@ -566,7 +564,7 @@ def main():
                 st.success(st.session_state.get("zip_note","ZIP ready."))
                 st.write("Copy summary:", st.session_state.get("zip_diag", {}))
                 try:
-                    exports_dir = Path(os.environ.get("RIR_EXPORTS","/home/on61ewex/Database/data/_exports"))
+                    exports_dir = Path(os.environ.get("RIR_EXPORTS", str(DATA_ROOT / "_exports")))
                     exports_dir.mkdir(parents=True, exist_ok=True)
                     out_file = exports_dir / "rir_export_page.zip"
                     with open(out_file, "wb") as f:
