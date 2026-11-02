@@ -34,6 +34,10 @@ def migrate(con):
         con.execute("ALTER TABLE rirs ADD COLUMN t60_s REAL")
     if "t60_method" not in cols:
         con.execute("ALTER TABLE rirs ADD COLUMN t60_method TEXT")
+    if "c50_db" not in cols:
+        con.execute("ALTER TABLE rirs ADD COLUMN c50_db REAL")
+    if "c80_db" not in cols:
+        con.execute("ALTER TABLE rirs ADD COLUMN c80_db REAL")
     con.commit()
 
 # ---------------- WAV readers ----------------
@@ -516,6 +520,8 @@ def main():
     ap.add_argument("--db", required=True)
     ap.add_argument("--limit", type=int, default=100000)
     ap.add_argument("--dataset", default=None)
+    ap.add_argument("--include-existing-t60", action="store_true",
+                    help="Also process rows with T60 already populated to backfill clarity.")
     ap.add_argument("--zip-roots", default="")
     ap.add_argument("--only-data-kind", default=None,
                    help="comma-separated list of data_kind values to include (e.g. rir,brir)")
@@ -527,7 +533,7 @@ def main():
             roots.append(d)
 
     con = sqlite3.connect(args.db); migrate(con); cur = con.cursor()
-    where = ["t60_s IS NULL"]
+    where = [] if args.include_existing_t60 else ["t60_s IS NULL"]
     params = []
     if args.dataset:
         where.append("dataset=?"); params.append(args.dataset)
@@ -540,7 +546,7 @@ def main():
         where.append("dataset=?"); params.append(args.dataset)
     rows = cur.execute(
         "SELECT id,file_path,file_format,file_name FROM rirs WHERE {} LIMIT ?"
-        .format(" AND ".join(where)), (*params, args.limit)
+        .format(" AND ".join(where) if where else "1=1"), (*params, args.limit)
     ).fetchall()
 
     ok = fail = 0
@@ -589,6 +595,9 @@ def main():
 
             t60, method = estimate_t60(sr, x)
             c50, c80 = clarity_db(sr, x)
+            cur.execute("UPDATE rirs SET c50_db=?, c80_db=? WHERE id=?",
+                        (float(c50) if c50 is not None else None,
+                         float(c80) if c80 is not None else None, rid))
             # annotate if fs was guessed from name
             if method and "->" not in method and "T30" in method:
                 pass  # keep simple
